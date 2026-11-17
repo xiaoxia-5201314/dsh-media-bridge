@@ -1,6 +1,6 @@
 {
   "name": "@local/media-bridge",
-  "version": "0.9.3",
+  "version": "0.9.4",
   "private": true,
   "type": "module",
   "description": "Voice and media bridge that calls exactly one upstream per request: subscription plans first (MiniMax M Plan, Qwen Token Plan), then pay-as-you-go in order Xiaomi (free), DeepSeek, MiniMax, Qwen. Provider and model are selectable, the per-capability order is editable by drag on the Settings page, and a failure returns a structured code so the caller decides whether to switch or retry, since image and video calls bill even on a timeout.",
