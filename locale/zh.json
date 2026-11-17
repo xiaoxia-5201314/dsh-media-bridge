@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "description": "为智能体提供六个工具：check_config、transcribe、synthesize、generate_image、generate_video、job_status，走传统 ASR→智能体→TTS 管道而非 Realtime 模型。v0.5 起每项能力自带降级链：优先走套餐（MiniMax M Plan 负责语音合成与生图，千问 Token Plan 负责识别与视频），套餐限流或额度用尽时自动切换到按量上游，顺序为小米（TTS 限时免费）→ DeepSeek → MiniMax → 千问；结果中的 provider 与 fallback_from 标明实际服务方和被跳过的一环。六个 ${credential:...} 引用名（MINIMAX_API_KEY、QWEN_TOKEN_PLAN_CN_API_KEY、XIAOMI_API_KEY、DEEPSEEK_API_KEY、MINIMAX_CN_API_KEY、QIANWEN_API_KEY）的值只填在插件目录之外的 %USERPROFILE%\\.dsh\\.credentials.yaml；使用模板的行必须带 inject: [credentials]，否则加载阶段直接失败。缺哪个引用链上自动跳过哪一环。产物一律先落盘再返回本地路径。已实测：MiniMax 2056 触发自动降级到小米出音、小米合成→千问识别跨厂商往返文字一致、真实生图与视频出片。未验证：链尾千问按量实调（账户仅免费额度）、凭据轮换重连、ffmpeg 转码（本机无 ffmpeg）、详情页渲染。限制：整段音频文件、无 VAD 打断、视频异步。v0.6 起设置面板新增「语音媒体桥」页，可视化调整降级链顺序、模型 ID、音色与接口地址，保存即时生效；同一配置也可用智能体工具 media_bridge_settings 读写。",
+    "title": "语音媒体桥"
+  }
+}

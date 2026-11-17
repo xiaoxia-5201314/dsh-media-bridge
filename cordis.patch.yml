@@ -1,0 +1,50 @@
+# 这是**模板**：下面三处 /PATH/TO/... 必须改成你自己机器上的绝对路径，
+# 否则 MCP 行会因为指向不存在的脚本而无法启动（换机器同步时尤其容易踩）。
+# 密钥只以「引用名」出现，绝不写值。
+# 值由 DSH 凭据库在运行时解析（expandTemplates: true），注入 MCP 子进程，
+# 诊断信息里的解析值自动替换为 [redacted]。
+#
+# inject: [credentials] 是必需的：使用 ${credential:...} 模板的行必须声明注入
+# 凭据服务，否则 dsh-mcp-client 在加载阶段直接抛
+# "MCP credential templates require a credentials provider" 而失败。
+#
+# v0.5 全链降级：一个进程带齐六把 key（四套餐 + 两按量），每项能力按
+# 「套餐优先，按量兜底（小米免费 → DeepSeek → MiniMax → 千问）」的顺序
+# 自动尝试；某家限流/配额用尽（MiniMax 2056/2068、HTTP 429、千问
+# Throttling/insufficient_quota）时无感切到下一家，结果里的 provider 字段
+# 标明实际服务方，fallback_from 标明跳过过谁。
+#
+#   transcribe      qwen-plan -> xiaomi -> deepseek -> qwen-payg -> minimax-plan -> minimax-payg
+#   synthesize      minimax-plan -> xiaomi -> deepseek -> minimax-payg -> qwen-payg
+#   generate_image  minimax-plan -> qwen-plan -> minimax-payg -> qwen-payg
+#   generate_video  qwen-plan -> minimax-payg -> qwen-payg
+#
+# 缺哪个引用名，链上那一环自动跳过；一个凭据都没有时六个工具里只剩
+# check_config。切换/增删上游只改这张表的引用名，代码不用动。
+- insert:
+    - id: media-bridge-mcp
+      name: '@deepseek-ai/dsh-mcp-client'
+      inject: [credentials]
+      config:
+        serverName: media_bridge
+        transport: stdio
+        command: python
+        args:
+          - '-u'
+          - '/PATH/TO/dsh-media-bridge/server/media_bridge.py'
+        cwd: '/PATH/TO/dsh-media-bridge'
+        expandTemplates: true
+        env:
+          MEDIA_BRIDGE_CHAINS_FILE: '/PATH/TO/.dsh/media-bridge.chains.json'
+          MEDIA_BRIDGE_MINIMAX_PLAN: '${credential:MINIMAX_API_KEY}'
+          MEDIA_BRIDGE_QWEN_PLAN: '${credential:QWEN_TOKEN_PLAN_CN_API_KEY}'
+          MEDIA_BRIDGE_XIAOMI: '${credential:XIAOMI_API_KEY}'
+          MEDIA_BRIDGE_DEEPSEEK: '${credential:DEEPSEEK_API_KEY}'
+          MEDIA_BRIDGE_MINIMAX_PAYG: '${credential:MINIMAX_CN_API_KEY}'
+          MEDIA_BRIDGE_QWEN_PAYG: '${credential:QIANWEN_API_KEY}'
+        # H3-Image 文档：服务端最长等待 600 秒，且接口非幂等——客户端提前放弃仍会计费，
+        # 所以工具超时必须高于 600 秒，避免我们超时放弃而对端照常出片扣费。
+        toolCallTimeoutMs: 660000
+    - id: media-bridge-settings
+      name: '@local/media-bridge'
+      config: {}
