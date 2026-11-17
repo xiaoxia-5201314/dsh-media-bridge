@@ -168,7 +168,10 @@ test('redesigned page uses theme tokens, five cards and one stepper per row', ()
     if (node.children) walk(node.children);
   })(x.section({ mediaBridge: x.controller, t: key => key }));
   const byClass = name => nodes.filter(n => typeof n.props.className === 'string' && n.props.className.split(' ').includes(name));
-  assert.equal(byClass('mb-card').length, 5, 'five themed cards expected');
+  const titles = nodes.filter(n => n.type === 'h3').map(n => String(n.children)).join('|');
+  for (const key of ['chains', 'models', 'voices', 'endpoints', 'budget'])
+    assert.ok(titles.includes(key), 'missing settings card: ' + key);
+  assert.equal(nodes.filter(n => n.type === 'h3').length, 6, 'one card per settings group');
   assert.equal(byClass('mb-foot').length, 1, 'one sticky action bar expected');
   const rows = byClass('mb-item');
   const steps = byClass('mb-step');
@@ -275,4 +278,32 @@ test('Qwen voice lists follow the configured model family and endpoint', () => {
   const hints = plain.x.locales.flatMap(d => [d.zh, d.en].filter(Boolean).map(v => v.voiceHint || ''));
   assert.equal(hints.length, 2, 'both dictionaries should carry the voice hint');
   assert.ok(hints.every(h => h.includes('target_model')), 'the model-binding warning must be in every language');
+});
+
+test('budget card renders all three tiers and edits emit a budget op', async () => {
+  const x = setup(ready({ budget: { daily_limit_cny: 10, provider_limit_cny: {}, model_limit_cny: {} } }));
+  const nodes = [];
+  (function walk(node) {
+    if (Array.isArray(node)) { node.forEach(walk); return; }
+    if (!node || typeof node !== 'object') return;
+    nodes.push(node);
+    if (node.children) walk(node.children);
+  })(x.section({ mediaBridge: x.controller, t: key => key }));
+  const numbers = nodes.filter(n => n.type === 'input' && n.props.type === 'number');
+  assert.ok(numbers.length >= 8, 'expected a daily field plus per-provider and per-model rows, got ' + numbers.length);
+  assert.ok(numbers.some(n => n.props.value === '10'), 'the daily cap should show the configured 10');
+  x.controller.setBudgetLimit('provider_limit_cny', 'minimax-payg', '2');
+  x.controller.setBudgetLimit('model_limit_cny', 'xiaomi:mimo-v2.5-tts', '0');
+  x.controller.setBudgetDaily('7.5');
+  await x.controller.save();
+  assert.equal(x.calls.length, 1);
+  const budget = x.calls[0][0].find(op => op.path[0] === 'budget');
+  assert.ok(budget, 'a changed cap must be submitted');
+  assert.equal(budget.value.daily_limit_cny, 7.5);
+  assert.equal(budget.value.provider_limit_cny['minimax-payg'], 2);
+  assert.equal(budget.value.model_limit_cny['xiaomi:mimo-v2.5-tts'], 0, '0 must survive as "closed"');
+  // blank means unlimited: the key disappears from the draft rather than becoming 0
+  x.controller.setBudgetLimit('provider_limit_cny', 'minimax-payg', '');
+  assert.equal('minimax-payg' in x.controller.draft.budget.provider_limit_cny, false,
+    'clearing a cap must remove it, not store zero (zero means closed)');
 });

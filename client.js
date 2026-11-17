@@ -181,6 +181,11 @@ window.__ModuleLoader__.load({
       configured: '已配置', missing: '未配置',
       preferred: '首选', providerOff: '已停用', unsaved: '未保存的修改', toggleGlobal: '全局启用/停用',
       modelsCount: '{n} 个', modelsDefault: '用内置默认', expandAll: '全部展开', collapseAll: '全部折叠', voiceHint: '音色只对这一家、且只对同族模型生效：千问两族音色不通用，混用会报 InvalidParameter / Engine error 411；复刻与设计音色还额外绑定创建时的 target_model。下面每条都标了所属模型，并按你配的模型自动筛选（CosyVoice 只有按量端有，套餐端实测 Model not exist）；MiniMax 和千问也接受复刻与音色设计 ID（用 voice_manage 创建，千问的复刻/设计只有按量端有），可手填。', customVoice: '自定义', voiceId: '音色 ID', voicePreset: '预设音色', voiceFemale: '女声', voiceMale: '男声',
+      budget: '花费上限',
+      budgetHint: '在发出请求之前拦截，被挡的调用不会到达厂商、不产生费用。留空 = 该档不限；填 0 = 关闭该类调用；负数在工具里表示不限。日额按本地日期零点清零，单价为估算，可在工具里用 budget.prices_cny 覆盖。',
+      budgetDaily: '今日总额上限（元）',
+      budgetUnlimited: '不限',
+      budgetModelHint: '按模型上限（provider:模型）——比品牌档更细，先命中者生效。',
       moveUp: '上移', moveDown: '下移',
       credentialHint: '密钥只写入 DSH 凭据库，不进配置文件、不留存在页面状态。保存或清除后需重启 media-bridge MCP 行（或重启 DSH）才生效。',
       keyInput: '粘贴 API Key', keyReplace: '已配置，粘贴可覆盖',
@@ -212,6 +217,11 @@ window.__ModuleLoader__.load({
       configured: 'configured', missing: 'not configured',
       preferred: 'First', providerOff: 'Off', unsaved: 'Unsaved changes', toggleGlobal: 'enable or disable globally',
       modelsCount: '{n} models', modelsDefault: 'built-in default', expandAll: 'Expand all', collapseAll: 'Collapse all', voiceHint: 'A voice applies to one provider and one model family: the two Qwen families do not share voice ids, and mixing them answers InvalidParameter / Engine error 411; cloned and designed voices are also bound to the target_model they were created with. Every entry names its model, and the list follows the model you configured (CosyVoice exists only on the pay-as-you-go endpoint; the token-plan endpoint answers Model not exist); voice_manage creates cloned and designed voices; on Qwen that endpoint exists only on the pay-as-you-go tier.', customVoice: 'custom', voiceId: 'voice id', voicePreset: 'preset voice', voiceFemale: 'female', voiceMale: 'male',
+      budget: 'Spend caps',
+      budgetHint: 'Applied before dispatch: a capped call never reaches the vendor and costs nothing. Blank = no cap for that tier, 0 = that class is closed (negative means unlimited via the tool). The daily total resets at local midnight; prices are estimates and can be overridden through budget.prices_cny.',
+      budgetDaily: 'Daily total cap (CNY)',
+      budgetUnlimited: 'unlimited',
+      budgetModelHint: 'Per-model caps (provider:model) - finer than the provider tier; whichever limit is hit first applies.',
       moveUp: 'Move up', moveDown: 'Move down',
       credentialHint: 'Keys go only to the DSH credential store, never into this config or page state. Restart the media-bridge MCP row (or DSH) after saving or clearing.',
       keyInput: 'Paste API key', keyReplace: 'Configured; paste to replace',
@@ -238,6 +248,25 @@ window.__ModuleLoader__.load({
       let generation = 0;
       const clone = value => JSON.parse(JSON.stringify(value));
       const object = value => value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+      const BUDGET_DEFAULT = { daily_limit_cny: 10, provider_limit_cny: {}, model_limit_cny: {}, prices_cny: {} };
+      function budgetTable(value) {
+        const out = {};
+        for (const [name, raw] of Object.entries(object(value))) {
+          const n = Number(raw);
+          if (Number.isFinite(n)) out[name] = n;
+        }
+        return out;
+      }
+      function normalizeBudget(value) {
+        const raw = object(value);
+        const daily = Number(raw.daily_limit_cny);
+        return {
+          daily_limit_cny: Number.isFinite(daily) ? daily : BUDGET_DEFAULT.daily_limit_cny,
+          provider_limit_cny: budgetTable(raw.provider_limit_cny),
+          model_limit_cny: budgetTable(raw.model_limit_cny),
+          prices_cny: budgetTable(raw.prices_cny),
+        };
+      }
       function normalize(value) {
         const source = object(value);
         const rawChains = object(source.chains);
@@ -248,7 +277,8 @@ window.__ModuleLoader__.load({
           chains[cap] = order;
         }
         return { chains, models: clone(object(source.models)), voices: clone(object(source.voices)),
-          baseUrls: clone(object(source.baseUrls)), disabled: Array.isArray(source.disabled) ? clone(source.disabled) : [] };
+          baseUrls: clone(object(source.baseUrls)), disabled: Array.isArray(source.disabled) ? clone(source.disabled) : [],
+          budget: normalizeBudget(source.budget) };
       }
       function modelList(provider, cap) {
         const raw = current().models?.[provider]?.[cap];
@@ -381,6 +411,20 @@ window.__ModuleLoader__.load({
           if (text === '') delete d.voices[provider]; else d.voices[provider] = text;
           status = ''; publish();
         },
+        setBudgetDaily(text) {
+          const d = edit();
+          if (!d) return;
+          const n = Number(text);
+          if (text !== '' && Number.isFinite(n)) { d.budget.daily_limit_cny = n; status = ''; publish(); }
+        },
+        setBudgetLimit(field, name, text) {
+          const d = edit();
+          if (!d) return;
+          const table = d.budget[field] || (d.budget[field] = {});
+          if (text === '') delete table[name];
+          else { const n = Number(text); if (Number.isFinite(n)) table[name] = n; }
+          status = ''; publish();
+        },
         setBaseUrl(provider, text) {
           const d = edit();
           if (!d) return;
@@ -391,7 +435,7 @@ window.__ModuleLoader__.load({
           if (!dirty() || saving || !snapshot.writable || snapshot.status !== 'ready') return;
           if (!validUrls(draft)) { status = 'invalidUrl'; publish(); return; }
           if (revision === undefined || snapshot.revision !== revision) { status = 'conflict'; publish(); return; }
-          const ops = ['chains', 'models', 'voices', 'baseUrls', 'disabled']
+          const ops = ['chains', 'models', 'voices', 'baseUrls', 'disabled', 'budget']
             .filter(field => !equal(draft[field], base[field]))
             .map(field => ({ op: 'set', path: [field], value: clone(draft[field]) }));
           const submittedGeneration = generation;
@@ -664,6 +708,40 @@ window.__ModuleLoader__.load({
           h('div', { className: 'mb-grid' }, Object.keys(PROVIDERS).map(p => h('div', { key: p, className: 'mb-row' },
             h('span', { className: 'mb-label' }, PROVIDERS[p].label),
             h('input', { className: 'mb-input', 'aria-label': PROVIDERS[p].label + ' · ' + t('endpoints'), placeholder: DEFAULT_BASES[p], value: draft.baseUrls[p] || '', onChange: e => ctrl.setBaseUrl(p, e.target.value) }))))),
+
+        h('section', { className: 'mb-card' },
+          h('h3', null, t('budget')),
+          h('p', { className: 'mb-note' }, t('budgetHint')),
+          h('div', { className: 'mb-row' },
+            h('span', { className: 'mb-label' }, t('budgetDaily')),
+            h('input', { className: 'mb-input', type: 'number', min: '0', step: '0.5', 'aria-label': t('budgetDaily'),
+              value: String(draft.budget.daily_limit_cny), onChange: e => ctrl.setBudgetDaily(e.target.value) })),
+          h('div', { className: 'mb-grid' }, Object.keys(PROVIDERS).map(p => h('div', { key: p, className: 'mb-row' },
+            h('span', { className: 'mb-label' }, PROVIDERS[p].label),
+            h('input', { className: 'mb-input', type: 'number', min: '0', step: '0.5', placeholder: t('budgetUnlimited'),
+              'aria-label': PROVIDERS[p].label + ' · ' + t('budget'),
+              value: draft.budget.provider_limit_cny[p] ?? '',
+              onChange: e => ctrl.setBudgetLimit('provider_limit_cny', p, e.target.value) })))),
+          h('p', { className: 'mb-note' }, t('budgetModelHint')),
+          h('div', { className: 'mb-grid' }, (() => {
+            const rows = [];
+            for (const p of Object.keys(PROVIDERS)) {
+              for (const cap of CAPS) {
+                const configured = ctrl.models(p, cap);
+                const seed = configured.length ? configured : [(MODEL_DEFAULTS[p] || {})[cap]].filter(Boolean);
+                for (const model of seed) {
+                  const key = p + ':' + model;
+                  rows.push(h('div', { key, className: 'mb-row' },
+                    h('span', { className: 'mb-label' }, PROVIDERS[p].label + ' · ' + model),
+                    h('input', { className: 'mb-input', type: 'number', min: '0', step: '0.5', placeholder: t('budgetUnlimited'),
+                      'aria-label': key + ' · ' + t('budget'),
+                      value: draft.budget.model_limit_cny[key] ?? '',
+                      onChange: e => ctrl.setBudgetLimit('model_limit_cny', key, e.target.value) })));
+                }
+              }
+            }
+            return rows;
+          })())),
 
         h('div', { className: 'mb-foot', 'aria-live': 'polite' },
           h('button', { className: 'mb-btn is-primary', disabled: !snap.writable || !ctrl.dirty() || ctrl.saving(), onClick: () => void ctrl.save() }, ctrl.saving() ? t('saving') : t('save')),
