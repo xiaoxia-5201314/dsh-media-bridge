@@ -8,13 +8,13 @@ import { pathToFileURL } from 'node:url';
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'media-bridge-host-test-'));
 const moduleDir = path.join(temp, 'node_modules', '@deepseek-ai', 'schemastery');
 fs.mkdirSync(moduleDir, { recursive: true });
-fs.writeFileSync(path.join(moduleDir, 'index.js'), `const schema = () => ({ volatile() { return this } }); exports.string = exports.object = exports.array = exports.dict = exports.union = schema;`);
+fs.writeFileSync(path.join(moduleDir, 'index.js'), `const schema = () => ({ volatile() { return this } }); exports.string = exports.object = exports.array = exports.dict = exports.union = exports.number = schema;`);
 process.env.DSH_INSTALL_DIR = temp;
 const bridge = await import(pathToFileURL(path.join(import.meta.dirname, 'index.js')).href);
 
 function host(file, state = {}) {
   const handlers = {};
-  const refs = Object.fromEntries(['chains', 'models', 'voices', 'baseUrls', 'disabled'].map(k => [k, { get: () => state[k] }]));
+  const refs = Object.fromEntries(['chains', 'models', 'voices', 'baseUrls', 'disabled', 'budget'].map(k => [k, { get: () => state[k] }]));
   let tool;
   const entry = {};
   const ctx = {
@@ -108,6 +108,31 @@ test('null clears a field back to the built-in default', async () => {
   assert.deepEqual(file.voices, { xiaomi: 'mimo_default' }, 'clearing one field must not touch the others');
   assert.equal((await h.tool.execute({ action: 'set', config: { chanins: null } })).ok, false);
   assert.equal((await h.tool.execute({ action: 'set', config: { chanins: null, voices: {} } })).ok, false);
+});
+
+test('budget survives the host-side merge and reaches the mirror file', async () => {
+  const dir = path.join(temp, 'budget');
+  const file = path.join(dir, 'chains.json');
+  const h = host(file, { budget: { daily_limit_cny: 10, provider_limit_cny: {}, model_limit_cny: {}, prices_cny: {} } });
+  const result = await h.tool.execute({
+    action: 'set',
+    config: { budget: { daily_limit_cny: 3.5, provider_limit_cny: { 'minimax-payg': 2 }, model_limit_cny: {}, prices_cny: { 'xiaomi:mimo-v2.5-tts': 0 } } },
+  });
+  assert.equal(result.ok, true);
+  const onDisk = JSON.parse(fs.readFileSync(file));
+  assert.equal(onDisk.budget.daily_limit_cny, 3.5, 'the cap must survive the hand-assembled merge');
+  assert.equal(onDisk.budget.provider_limit_cny['minimax-payg'], 2);
+  assert.equal(onDisk.budget.prices_cny['xiaomi:mimo-v2.5-tts'], 0);
+  // a non-numeric price entry is refused outright rather than quietly dropped, so a
+  // typo in the cap table cannot half-apply
+  const junk = await h.tool.execute({ action: 'set', config: { budget: { daily_limit_cny: 1, prices_cny: { a: 'x', b: 2 } } } });
+  assert.equal(junk.ok, false, 'malformed budget.prices_cny must be refused');
+  assert.match(String(junk.error), /prices_cny/);
+  assert.deepEqual(JSON.parse(fs.readFileSync(file)).budget.prices_cny, { 'xiaomi:mimo-v2.5-tts': 0 });
+  // and a bad shape is refused before saving
+  for (const bad of [{ budget: 5 }, { budget: { daily_limit_cny: 'ten' } }, { budget: { prices_cny: [] } }]) {
+    assert.equal((await h.tool.execute({ action: 'set', config: bad })).ok, false, JSON.stringify(bad));
+  }
 });
 
 process.on('exit', () => fs.rmSync(temp, { recursive: true, force: true }));

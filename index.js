@@ -43,6 +43,9 @@ export const DEFAULTS = {
   voices: {},
   baseUrls: {},
   disabled: [],
+  // Spend cap, enforced by the MCP child before it dispatches a request.
+  // Negative limit = no cap; 0 = that class is closed. Prices are CNY estimates.
+  budget: { daily_limit_cny: 10, provider_limit_cny: {}, model_limit_cny: {}, prices_cny: {} },
 };
 
 /** Locate Schemastery inside the running DSH installation. */
@@ -97,9 +100,15 @@ export const Config = z.object({
   voices: z.dict(z.string()).volatile(),
   baseUrls: z.dict(z.string()).volatile(),
   disabled: z.array(z.string()).volatile(),
+  budget: z.object({
+    daily_limit_cny: z.number(),
+    provider_limit_cny: z.dict(z.number()),
+    model_limit_cny: z.dict(z.number()),
+    prices_cny: z.dict(z.number()),
+  }).volatile(),
 });
 
-const FIELDS = ['chains', 'models', 'voices', 'baseUrls', 'disabled'];
+const FIELDS = ['chains', 'models', 'voices', 'baseUrls', 'disabled', 'budget'];
 
 function isPlainObject(value) {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -157,6 +166,21 @@ export function validateConfig(value) {
     if (!Array.isArray(config.disabled)) issues.push('disabled must be an array');
     else for (const p of config.disabled) if (!PROVIDERS[p]) issues.push(`disabled: unknown provider "${p}"`);
   }
+  if (config.budget !== undefined) {
+    if (!isPlainObject(config.budget)) { issues.push('budget must be an object'); }
+    else {
+      const daily = config.budget.daily_limit_cny;
+      if (daily !== undefined && (typeof daily !== 'number' || Number.isNaN(daily) || daily < 0))
+        issues.push('budget.daily_limit_cny must be a number >= 0 (negative means unlimited)');
+      for (const key of ['provider_limit_cny', 'model_limit_cny', 'prices_cny']) {
+        const table = config.budget[key];
+        if (table === undefined) continue;
+        if (!isPlainObject(table)) { issues.push(`budget.${key} must be an object`); continue; }
+        for (const [name, value] of Object.entries(table))
+          if (typeof value !== 'number' || Number.isNaN(value)) issues.push(`budget.${key}.${name} must be a number`);
+      }
+    }
+  }
   return issues;
 }
 
@@ -171,12 +195,25 @@ function mergeConfig(value) {
   }
   const disabled = Array.isArray(plain(config.disabled)) ? plain(config.disabled) : [];
   for (const cap of CAPABILITIES) chains[cap] = chains[cap].filter(p => !disabled.includes(p));
+  const rawBudget = plain(config.budget) ?? {};
+  const number = (value, fallback) => (typeof value === 'number' && Number.isFinite(value) ? value : fallback);
+  const table = (value) => (isPlainObject(value)
+    ? Object.fromEntries(Object.entries(value).filter(([, n]) => typeof n === 'number' && Number.isFinite(n)))
+    : {});
   return {
     chains,
     models: plain(config.models) ?? {},
     voices: plain(config.voices) ?? {},
     baseUrls: plain(config.baseUrls) ?? {},
     disabled,
+    // assembled by hand on purpose: a silently dropped field would mean the child
+    // keeps enforcing the previous cap while the page shows a new one
+    budget: {
+      daily_limit_cny: number(rawBudget.daily_limit_cny, DEFAULTS.budget.daily_limit_cny),
+      provider_limit_cny: table(rawBudget.provider_limit_cny),
+      model_limit_cny: table(rawBudget.model_limit_cny),
+      prices_cny: table(rawBudget.prices_cny),
+    },
   };
 }
 

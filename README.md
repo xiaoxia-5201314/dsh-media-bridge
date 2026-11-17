@@ -1,69 +1,4 @@
-# dsh-media-bridge · 语音媒体桥
-
-DeepSeek Harness（DSH）配置型插件：把**语音转写、语音合成、生图、生视频**聚合成智能体可以直接调用的工具。
-每次调用**只打一个上游**（套餐优先、按量兜底），失败返回结构化错误码 `{code, provider, model, retryable}`，
-由调用方决定重试还是换家——因为生图、生视频**不幂等**，客户端超时也照样计费，插件不替你做花钱的决定。
-
-> ⚠️ 使用前三件事，请务必读完
->
-> 1. **本仓库不含任何密钥。** 代码里只出现凭据「引用名」；真实值必须由你自己放进 DSH 凭据库
->    （`~/.dsh/.credentials.yaml`）或启动前的环境变量。请不要把 `.env` 提交到任何地方。
-> 2. **它会把你的文本、图片、音频发送给你配置的第三方服务**（MiniMax / 千问 / 小米 MiMo / DeepSeek）。
->    不要喂入你不愿交给这些服务商的内容；各家的数据保留政策请自行确认。
-> 3. **调用会产生你账号下的真实费用。** 本项目按 MIT 提供，AS IS，不对用量、限流、计费、
->    模型下线造成的任何结果负责。生图/生视频单价见各家定价页，默认选择偏保守。
-
-## 安装
-
-```bash
-# 1) 放到 DSH 能读到的目录（示例）
-git clone https://github.com/xiaoxia-5201314/dsh-media-bridge.git ~/dsh-media-bridge
-
-# 2) 在 DSH profile 里以 link: 方式安装该 bundle（包名 @local/media-bridge）
-#    插件自带的 cordis.patch.yml 会注册两行：
-#      media-bridge-mcp      -> @deepseek-ai/dsh-mcp-client（stdio 启动 server/media_bridge.py）
-#      media-bridge-settings -> @local/media-bridge（设置页 + media_bridge_settings 工具）
-#
-#    注意：cordis.patch.yml 里的 command / args / cwd / MEDIA_BRIDGE_CHAINS_FILE
-#    是**按机器写死**的绝对路径，换机器要按自己的实际路径改。
-
-# 3) 填凭据（值不要进代码目录）
-#    MEDIA_BRIDGE_MINIMAX_PLAN -> MINIMAX_API_KEY            MiniMax M Plan
-#    MEDIA_BRIDGE_QWEN_PLAN    -> QWEN_TOKEN_PLAN_CN_API_KEY  千问套餐
-#    MEDIA_BRIDGE_XIAOMI       -> XIAOMI_API_KEY              小米 MiMo（TTS 限时免费）
-#    MEDIA_BRIDGE_DEEPSEEK     -> DEEPSEEK_API_KEY            DeepSeek 按量
-#    MEDIA_BRIDGE_MINIMAX_PAYG -> MINIMAX_CN_API_KEY          MiniMax 按量
-#    MEDIA_BRIDGE_QWEN_PAYG    -> QIANWEN_API_KEY             千问按量
-#    缺哪个引用，链上对应环节自动跳过；一个都没有时只剩 check_config。
-```
-
-## 一分钟上手
-
-| 想做的事 | 怎么做 |
-|---|---|
-| 看现在到底哪家可用 | 工具 `check_config`（只回布尔值，永不输出密钥） |
-| 说话转文字 | `transcribe`，传本地音频路径；小米/MiniMax 走 base64，DeepSeek 走 multipart |
-| 文字转语音 | `synthesize`，可选 `provider` / `model` / `voice` / `instruction` / `ssml` / `emotion` |
-| 造自己的音色 | `voice_manage`：`create_clone`（样本音频）或 `create_design`（文字描述），**创建免费**，合成按目标模型计费 |
-| 生图 / 改图 | `generate_image`；带 `images=[...]` 即走 H3 图片编辑（1~16 张参考图） |
-| 生视频 | `generate_video` 拿 `job_id`，再用 `job_status` 查（两族协议不同，插件自动分流） |
-| 看厂商有没有新模型 | `list_models`（免费列目录，不产生调用费用） |
-| 调顺序 / 换模型 / 换音色 / 填密钥 | 设置页：**「设置 → 插件 → 语音媒体桥」**，支持拖拽排序、按能力分卡、可折叠 |
-
-完整能力与限制见下面的实测记录。
-
-## 开发
-
-```bash
-cd server && python -m unittest test_tts_variants test_minimax_video test_deepseek_asr \
-  test_minimax_image test_single_target_routing test_list_models test_download_naming test_v09_controls
-python -m unittest test_synthesize_runtime          # 仓库根目录
-node --test client.test.cjs host.test.mjs           # 设置页与宿主侧
-```
-
-许可证：**MIT**（见 `LICENSE`）。
-
----
+# 语音媒体桥 · Voice and media bridge
 
 > **English summary.** A DSH bundle that gives the agent eight tools: `check_config`, `transcribe`,
 > `synthesize`, `generate_image`, `generate_video`, `job_status`, `list_models`, `voice_manage`. It uses a classical pipeline
@@ -80,6 +15,24 @@ node --test client.test.cjs host.test.mjs           # 设置页与宿主侧
 不用 Realtime 全双工模型，走传统 Pipeline（ASR → 智能体 → TTS）。**每次调用只打一个上游**：省略参数时取该能力
 顺序列表里第一个可用的，也可以用 `provider` / `model` 明确指定；失败时返回结构化错误码，由智能体决定换不换、
 要不要重试——生图与生视频不幂等，超时也计费，替你重试就是替你花钱。
+
+## 花费上限（v0.9.3）
+
+`budget` 配置项，三档独立、**在发出请求之前**拦截：
+
+| 档位 | 字段 | 默认 | 语义 |
+|---|---|---|---|
+| 统一日额 | `daily_limit_cny` | **10** | 本地日期零点自动清零 |
+| 按品牌 | `provider_limit_cny[minimax-payg]` 等 | 未设=不限 | 与日额独立判断 |
+| 按模型 | `model_limit_cny["minimax-payg:MiniMax-H3-Lite"]` 或裸模型名 | 未设=不限 | 同上 |
+
+负数 = 不限；`0` = 关闭该类调用。被挡时返回 `code=budget_exhausted`，消息里写清是哪一档、
+已用多少、本次预估多少，并且**请求没有发出、不产生费用**。成功调用会在结果里回显
+`cost_estimate_cny` 与 `budget_used_today_cny`。
+
+估算用的价目表**只包含已从定价页确认或本机实测过的项**，其余取保守上界（宁多算不少算），
+可用 `budget.prices_cny` 覆盖；账本是链文件同目录的 `media-bridge.usage.json`（0600）。
+**账本无法写入时调用会被拒绝**（`budget_unavailable`）——宁可挡住，也不在无记账状态下花钱。
 
 ## 上游选择（v0.7：单目标，不再自动降级）
 

@@ -1214,6 +1214,160 @@ DEFAULT_MODELS = {
 }
 
 
+# ---------------------------------------------------------------- spend budget
+# The cap is applied before dispatch on purpose: the point is to stop a call, not to
+# record that it happened. Every estimate is returned to the caller as
+# cost_estimate_cny / budget_used_today_cny so the number is never a black box.
+
+BUDGET_DEFAULTS = {"daily_limit_cny": 10.0, "provider_limit_cny": {}, "model_limit_cny": {},
+                   "prices_cny": {}}
+# Confirmed against the vendors' pricing pages or this account on 2026-11-17.
+MINIMAX_VIDEO_PER_SECOND = {("MiniMax-H3-Lite", "480P"): 0.16, ("MiniMax-H3-Lite", "768P"): 0.26,
+                            ("MiniMax-H3", "768P"): 0.50, ("MiniMax-H3", "2K"): 0.80,
+                            ("MiniMax-H3-Max", "768P"): 0.50, ("MiniMax-H3-Max", "2K"): 0.80}
+MINIMAX_IMAGE_PER_SHOT = {("MiniMax-H3-Image", "1K"): 0.143, ("MiniMax-H3-Image", "2K"): 0.57,
+                          ("MiniMax-H3-Image", "4K"): 2.28,
+                          ("MiniMax-H3-Image-Highspeed", "1K"): 0.232,
+                          ("MiniMax-H3-Image-Highspeed", "2K"): 0.93,
+                          ("MiniMax-H3-Image-Highspeed", "4K"): 3.71}
+MINIMAX_TTS_PER_CHAR = {"speech-2.8-hd": 0.00035, "speech-2.6-hd": 0.00035, "speech-02-hd": 0.00035,
+                        "speech-2.8-turbo": 0.0002, "speech-2.6-turbo": 0.0002, "speech-02-turbo": 0.0002}
+DEEPSEEK_ASR_PER_SECOND = 0.78 / 3600.0
+# MiMo TTS/ASR is billed "free for a limited time" per Xiaomi's own doc; if that ends,
+# put a price in budget.prices_cny instead of editing code.
+FREE_PROVIDERS = frozenset({"xiaomi"})
+UNKNOWN_COST = {"generate_image": 0.30, "video_per_second": 0.60, "tts_per_char": 0.0005,
+                "asr_per_second": 0.0010}
+UNKNOWN_AUDIO_SECONDS = 120.0
+
+
+def budget_settings() -> dict:
+    out = {"daily_limit_cny": BUDGET_DEFAULTS["daily_limit_cny"], "provider_limit_cny": {},
+           "model_limit_cny": {}, "prices_cny": {}}
+    raw = runtime_config().get("budget")
+    if not isinstance(raw, dict):
+        return out
+    if isinstance(raw.get("daily_limit_cny"), (int, float)):
+        out["daily_limit_cny"] = float(raw["daily_limit_cny"])
+    for key in ("provider_limit_cny", "model_limit_cny", "prices_cny"):
+        value = raw.get(key)
+        if isinstance(value, dict):
+            out[key] = {str(k): float(v) for k, v in value.items() if isinstance(v, (int, float))}
+    return out
+
+
+def usage_file() -> Path:
+    chains = os.environ.get("MEDIA_BRIDGE_CHAINS_FILE")
+    base = Path(chains).parent if chains else OUT_DIR
+    return Path(base) / "media-bridge.usage.json"
+
+
+def _fresh_day() -> dict:
+    return {"date": time.strftime("%Y-%m-%d"), "total": 0.0, "by_provider": {}, "by_model": {}, "calls": 0}
+
+
+def usage_today() -> dict:
+    """Today's ledger in local dates; a stale file rolls over implicitly."""
+    try:
+        data = json.loads(Path(usage_file()).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return _fresh_day()
+    if not isinstance(data, dict) or data.get("date") != time.strftime("%Y-%m-%d"):
+        return _fresh_day()
+    fresh = _fresh_day()
+    for key, default in fresh.items():
+        if key not in data or not isinstance(data[key], type(default)):
+            data[key] = default
+    return data
+
+
+def save_usage(data: dict) -> None:
+    path = Path(usage_file())
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp, path)
+        os.chmod(path, 0o600)
+    except OSError as exc:
+        raise TargetError(f"花费账本无法写入 {path}: {exc}；为避免无上限扣费，本次调用已拒绝",
+                          code="budget_unavailable") from None
+
+
+def media_seconds(path) -> float:
+    try:
+        source = Path(str(path)).expanduser()
+        if source.suffix.lower() == ".wav" and source.is_file():
+            return float(_wav_facts(source.read_bytes()).get("seconds") or UNKNOWN_AUDIO_SECONDS)
+    except Exception:
+        pass
+    return UNKNOWN_AUDIO_SECONDS
+
+
+def estimate_cost(capability: str, provider: str, model: str, args: dict) -> float:
+    settings = budget_settings()
+    for key in (f"{provider}:{model}", model):
+        if key in settings["prices_cny"]:
+            return max(0.0, float(settings["prices_cny"][key]))
+    if provider in FREE_PROVIDERS:
+        return 0.0
+    if capability == "generate_image":
+        shots = max(1, int(args.get("n", 1) or 1))
+        area = str(args.get("area") or "1K").upper()
+        known = MINIMAX_IMAGE_PER_SHOT.get((model, area))
+        return (known if known is not None else UNKNOWN_COST["generate_image"]) * shots
+    if capability == "generate_video":
+        try:
+            seconds = int(args.get("duration", 5) or 5)
+        except (TypeError, ValueError):
+            seconds = 5
+        if seconds < 0:
+            seconds = 10  # "-1 lets the vendor choose"; assume a mid-length clip
+        known = MINIMAX_VIDEO_PER_SECOND.get((model, str(args.get("resolution") or "768P")))
+        return (known if known is not None else UNKNOWN_COST["video_per_second"]) * max(1, seconds)
+    if capability == "synthesize":
+        chars = max(1, len(str(args.get("text") or "")))
+        return MINIMAX_TTS_PER_CHAR.get(model, UNKNOWN_COST["tts_per_char"]) * chars
+    if capability == "transcribe":
+        rate = DEEPSEEK_ASR_PER_SECOND if provider == "deepseek" else UNKNOWN_COST["asr_per_second"]
+        return rate * media_seconds(args.get("audio_path"))
+    return 0.0
+
+
+def budget_block(capability: str, provider: str, model: str, cost: float):
+    """Return a refusal message when any tier would be exceeded, else None."""
+    if cost <= 0:
+        return None
+    settings = budget_settings()
+    used = usage_today()
+    model_key = f"{provider}:{model}"
+    limit_model = settings["model_limit_cny"].get(model_key, settings["model_limit_cny"].get(model))
+    for label, limit, spent in (
+            ("今日总额", settings["daily_limit_cny"], float(used["total"])),
+            (f"品牌 {provider}", settings["provider_limit_cny"].get(provider), float(used["by_provider"].get(provider, 0.0))),
+            (f"模型 {model}", limit_model, float(used["by_model"].get(model_key, 0.0)))):
+        if limit is None or not isinstance(limit, (int, float)) or limit < 0:
+            continue  # unset or negative means "no cap for this tier"
+        if spent + cost > float(limit):
+            return (f"{label}花费上限 ¥{float(limit):.2f}：今日已用 ¥{spent:.2f}，本次预估 ¥{cost:.2f}。"
+                    "请求未发出、未产生费用。上限可改 budget.daily_limit_cny / provider_limit_cny / "
+                    "model_limit_cny，价目表可改 budget.prices_cny；负数表示不限，0 表示关闭该类调用。")
+    return None
+
+
+def budget_record(capability: str, provider: str, model: str, cost: float) -> float:
+    if cost <= 0:
+        return 0.0
+    data = usage_today()
+    model_key = f"{provider}:{model}"
+    data["total"] = round(float(data["total"]) + cost, 6)
+    data["by_provider"][provider] = round(float(data["by_provider"].get(provider, 0.0)) + cost, 6)
+    data["by_model"][model_key] = round(float(data["by_model"].get(model_key, 0.0)) + cost, 6)
+    data["calls"] = int(data["calls"]) + 1
+    save_usage(data)
+    return data["total"]
+
+
 class TargetError(Exception):
     def __init__(self, message: str, *, provider=None, model=None, retryable=False, code='target_failed'):
         super().__init__(message)
@@ -1256,6 +1410,10 @@ def call_chain(capability: str, args: dict) -> dict:
     if provider != "deepseek":
         model = provider_model(provider, capability, DEFAULT_MODELS[capability][provider], args)
         selected_args["model"] = model
+    cost = estimate_cost(capability, provider, model, selected_args)
+    refusal = budget_block(capability, provider, model, cost)
+    if refusal:
+        raise TargetError(refusal, provider=provider, model=model, code="budget_exhausted")
     try:
         result = available[provider](selected_args)
     except TargetError:
@@ -1264,9 +1422,13 @@ def call_chain(capability: str, args: dict) -> dict:
     except Exception as exc:
         raise TargetError(redact(str(exc)), provider=provider, model=model,
                           retryable=isinstance(exc, Retryable), code="upstream_failed") from None
+    spent = budget_record(capability, provider, model, cost)
     result["provider"] = provider
     if model is not None:
         result["model"] = model
+    if cost > 0:
+        result["cost_estimate_cny"] = round(cost, 4)
+        result["budget_used_today_cny"] = spent
     return result
 
 
