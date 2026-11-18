@@ -138,18 +138,23 @@ class BudgetTests(unittest.TestCase):
         self.assertAlmostEqual(result["cost_estimate_cny"], 2.6)
         self.assertAlmostEqual(result["budget_used_today_cny"], 2.6)
 
-    def test_a_corrupt_ledger_fails_closed(self):
-        Path(m.usage_file()).write_text("{not json", encoding="utf-8")
-        self.video()  # unreadable ledger is treated as an empty day, then rewritten
-        self.assertEqual(m.usage_today()["calls"], 1)
-        Path(m.usage_file()).write_text("{{{", encoding="utf-8")
-        os.chmod(m.usage_file(), 0o400)  # unwritable: refuse rather than run uncapped
+    def test_an_unwritable_ledger_refuses_to_spend_for_any_user(self):
+        # A parent that is a regular file fails the write for root as well, so this
+        # tests the guard rather than the filesystem's permission model.
+        blocker = Path(self.tmp.name) / "blocker"
+        blocker.write_text("not a directory", encoding="utf-8")
+        saved = os.environ.get("MEDIA_BRIDGE_CHAINS_FILE")
+        os.environ["MEDIA_BRIDGE_CHAINS_FILE"] = str(blocker / "nested" / "chains.json")
         try:
             with self.assertRaises(m.TargetError) as ctx:
                 self.video()
             self.assertEqual(ctx.exception.code, "budget_unavailable")
+            self.assertEqual(self.sent, [], "nothing may leave the process without a ledger")
         finally:
-            os.chmod(m.usage_file(), 0o600)
+            if saved is not None:
+                os.environ["MEDIA_BRIDGE_CHAINS_FILE"] = saved
+            else:
+                os.environ.pop("MEDIA_BRIDGE_CHAINS_FILE", None)
 
 
 if __name__ == "__main__":

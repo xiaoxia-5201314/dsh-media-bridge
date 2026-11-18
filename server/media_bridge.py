@@ -1334,6 +1334,25 @@ def estimate_cost(capability: str, provider: str, model: str, args: dict) -> flo
     return 0.0
 
 
+def budget_preflight(cost: float) -> None:
+    """Refuse to spend when the ledger cannot be written.
+
+    Recording happens after the vendor call, so checking only at record time would let
+    an uncounted request through. This probe costs one zero-byte append.
+    """
+    if cost <= 0:
+        return
+    path = Path(usage_file())
+    try:
+        Path(path.parent).mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8"):
+            pass
+    except OSError as exc:
+        raise TargetError(f"花费账本不可写（{path}）：{exc}；请求未发出、未产生费用。"
+                          "宁可拒绝，也不要在无记账状态下扣费。",
+                          code="budget_unavailable") from None
+
+
 def budget_block(capability: str, provider: str, model: str, cost: float):
     """Return a refusal message when any tier would be exceeded, else None."""
     if cost <= 0:
@@ -1411,6 +1430,7 @@ def call_chain(capability: str, args: dict) -> dict:
         model = provider_model(provider, capability, DEFAULT_MODELS[capability][provider], args)
         selected_args["model"] = model
     cost = estimate_cost(capability, provider, model, selected_args)
+    budget_preflight(cost)
     refusal = budget_block(capability, provider, model, cost)
     if refusal:
         raise TargetError(refusal, provider=provider, model=model, code="budget_exhausted")
