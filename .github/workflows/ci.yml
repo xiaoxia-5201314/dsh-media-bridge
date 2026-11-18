@@ -1,0 +1,49 @@
+name: CI
+
+# Everything below runs offline: the vendor HTTP layer is patched in every test,
+# so no workflow run needs a key and none can spend money.
+on:
+  push:
+  pull_request:
+
+jobs:
+  offline-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: syntax check
+        run: |
+          python - <<'PY'
+          import ast, glob
+          for path in glob.glob('**/*.py', recursive=True):
+              ast.parse(open(path, encoding='utf-8').read(), filename=path)
+          PY
+          node --check index.js
+          node --check client.js
+
+      - name: python tests (108 cases, all mocked)
+        run: >
+          python -m unittest -v
+          server.test_tts_variants server.test_v09_controls server.test_single_target_routing
+          server.test_minimax_video server.test_deepseek_asr server.test_minimax_image
+          server.test_list_models server.test_download_naming server.test_budget
+          test_synthesize_runtime
+
+      - name: javascript tests (settings page + host plugin)
+        run: node --test client.test.cjs host.test.mjs
+
+      - name: refuse to build on a committed secret value
+        run: |
+          if grep -rInE 'ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9]{32,}' . ; then
+            echo 'a real-looking credential appeared in the tree; failing the build'
+            exit 1
+          fi

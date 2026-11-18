@@ -1,5 +1,7 @@
 # 语音媒体桥 · Voice and media bridge
 
+[![CI](https://github.com/xiaoxia-5201314/dsh-media-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/xiaoxia-5201314/dsh-media-bridge/actions/workflows/ci.yml)
+
 > **English summary.** A DSH bundle that gives the agent eight tools: `check_config`, `transcribe`,
 > `synthesize`, `generate_image`, `generate_video`, `job_status`, `list_models`, `voice_manage`. It uses a classical pipeline
 > (ASR → agent → TTS) instead of an expensive Realtime model. **Every capability walks a provider
